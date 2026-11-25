@@ -1,0 +1,70 @@
+# steps/tf-apply.yml
+# Apply the SAVED plan — not a re-plan.
+# This guarantees the diff an approver reviewed is exactly what runs.
+
+parameters:
+- name: environment
+  type: string
+- name: component
+  type: string
+
+steps:
+
+# ── Re-init on fresh apply agent ──────────────────────────────────────────────
+- script: |
+    cat > backend.hcl <<EOF
+    bucket         = "$(TF_STATE_BUCKET)"
+    key            = "${{ parameters.environment }}/${{ parameters.component }}/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "$(TF_LOCK_TABLE)"
+    encrypt        = true
+    EOF
+    terraform init -input=false -backend-config=backend.hcl
+  displayName: "terraform init (apply agent)"
+  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+  env:
+    AWS_ROLE_ARN:                $(AWS_ROLE_ARN)
+    AWS_WEB_IDENTITY_TOKEN_FILE: $(AGENT_TEMPDIRECTORY)/oidc-token
+
+# ── Download the exact plan from the Plan stage ───────────────────────────────
+- task: DownloadPipelineArtifact@2
+  displayName: "Download plan artifact (same run)"
+  inputs:
+    artifact: "plan-${{ parameters.environment }}-${{ parameters.component }}-$(Build.BuildId)"
+    path:     $(Pipeline.Workspace)/plan-artifact
+
+# ── Apply the saved plan ──────────────────────────────────────────────────────
+- script: |
+    terraform apply \
+      -input=false \
+      $(Pipeline.Workspace)/plan-artifact/tfplan
+  displayName: "terraform apply (saved plan)"
+  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+  env:
+    AWS_ROLE_ARN:                $(AWS_ROLE_ARN)
+    AWS_WEB_IDENTITY_TOKEN_FILE: $(AGENT_TEMPDIRECTORY)/oidc-token
+
+# ── Capture outputs for evidence ─────────────────────────────────────────────
+- script: |
+    terraform output -json \
+      > $(Build.ArtifactStagingDirectory)/outputs.json
+    echo "──── Outputs ────"
+    cat $(Build.ArtifactStagingDirectory)/outputs.json
+  displayName: "terraform output -json"
+  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+  env:
+    AWS_ROLE_ARN:                $(AWS_ROLE_ARN)
+    AWS_WEB_IDENTITY_TOKEN_FILE: $(AGENT_TEMPDIRECTORY)/oidc-token
+
+# ── Copy plan.txt into evidence so the Evidence stage can grep it ─────────────
+- script: |
+    cp $(Pipeline.Workspace)/plan-artifact/plan.txt \
+       $(Build.ArtifactStagingDirectory)/plan.txt 2>/dev/null || true
+  displayName: "Copy plan.txt to evidence"
+
+# ── Publish evidence artifact ─────────────────────────────────────────────────
+- task: PublishPipelineArtifact@1
+  displayName: "Publish evidence artifact"
+  inputs:
+    targetPath: $(Build.ArtifactStagingDirectory)
+    artifact:   "evidence-${{ parameters.environment }}-${{ parameters.component }}-$(Build.BuildId)"

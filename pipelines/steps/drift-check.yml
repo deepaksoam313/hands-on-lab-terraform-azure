@@ -1,0 +1,54 @@
+# steps/drift-check.yml
+# Nightly drift detection — terraform plan -detailed-exitcode.
+# Exit 0 = clean. Exit 2 = drift detected (warn + would open a ticket).
+
+parameters:
+- name: environment
+  type: string
+- name: component
+  type: string
+
+steps:
+
+- script: |
+    cat > backend.hcl <<EOF
+    bucket         = "$(TF_STATE_BUCKET)"
+    key            = "${{ parameters.environment }}/${{ parameters.component }}/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "$(TF_LOCK_TABLE)"
+    encrypt        = true
+    EOF
+    cat > pipeline.auto.tfvars <<EOF
+    vpc_id        = "$(VPC_ID)"
+    subnet_id     = "$(SUBNET_ID)"
+    bucket_suffix = "$(BUCKET_SUFFIX)"
+    EOF
+    terraform init -input=false -backend-config=backend.hcl
+  displayName: "Init (${{ parameters.environment }})"
+  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+  env:
+    AWS_ROLE_ARN:                $(AWS_ROLE_ARN)
+    AWS_WEB_IDENTITY_TOKEN_FILE: $(AGENT_TEMPDIRECTORY)/oidc-token
+
+- script: |
+    set +e
+    terraform plan -detailed-exitcode -input=false -out=drift.tfplan
+    EXIT=$?
+
+    if [ $EXIT -eq 0 ]; then
+      echo "No drift in ${{ parameters.environment }}/$(COMPONENT). Clean."
+
+    elif [ $EXIT -eq 2 ]; then
+      echo "##vso[task.logissue type=warning]DRIFT DETECTED: ${{ parameters.environment }}/$(COMPONENT)"
+      terraform show -no-color drift.tfplan
+      # Production: POST to ServiceNow or Teams webhook here.
+
+    else
+      echo "##vso[task.logissue type=error]Plan error during drift check (exit $EXIT)"
+      exit 1
+    fi
+  displayName: "Drift plan — ${{ parameters.environment }}"
+  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+  env:
+    AWS_ROLE_ARN:                $(AWS_ROLE_ARN)
+    AWS_WEB_IDENTITY_TOKEN_FILE: $(AGENT_TEMPDIRECTORY)/oidc-token

@@ -1,0 +1,13 @@
+# steps/install-terraform.yml
+# Reusable step template — installs the pinned Terraform version.
+# Every job that needs terraform includes this template first.
+
+steps:
+- script: |
+    curl -fsSL \
+      https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip \
+      -o /tmp/terraform.zip
+    unzip -q /tmp/terraform.zip -d /tmp
+    sudo mv /tmp/terraform /usr/local/bin/terraform
+    terraform version
+  displayName: "Install Terraform $(TF_VERSION)"

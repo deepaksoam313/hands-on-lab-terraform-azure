@@ -1,0 +1,504 @@
+# =============================================================================
+# pipelines/terraform-cd.yml
+#
+# Full production Azure DevOps pipeline for Terraform IaC.
+# Component: environments/*/compute  (EC2 instance + S3 bucket)
+#
+# FLOW
+# ────
+#  PR to main
+#    └─ Stage: CI  (parallel quality gates — no cloud creds needed)
+#         ├─ job: fmt          terraform fmt -check -recursive
+#         ├─ job: validate     terraform init -backend=false && validate
+#         ├─ job: lint         TFLint
+#         ├─ job: tfsec        tfsec static scan  (SARIF + JUnit)
+#         ├─ job: checkov      Checkov static scan (JUnit)
+#         └─ job: docs         terraform-docs diff (README must be up to date)
+#
+#  Merge to main
+#    └─ Stage: CI  (same gates)
+#    └─ Stage: PlanNonprod     terraform plan → publish artifact
+#    └─ Stage: PolicyNonprod   OPA/conftest on plan.json  ← gate
+#    └─ Stage: ApplyNonprod    approval gate (platform-team) → apply saved plan
+#    └─ Stage: PlanProd        only if nonprod apply succeeded
+#    └─ Stage: PolicyProd      OPA/conftest on prod plan.json ← gate
+#    └─ Stage: ApplyProd       approval gate (CAB group, release-* tag only)
+#    └─ Stage: Evidence        outputs + plan summary artifact + release record
+#
+#  Nightly schedule
+#    └─ Stage: DriftCheck      terraform plan -detailed-exitcode per env
+#
+# WIRING REQUIRED IN AZURE DEVOPS
+# ────────────────────────────────
+# 1. Variable groups (each linked to its Key Vault):
+#      tf-nonprod-vars  — TF_STATE_BUCKET, TF_LOCK_TABLE, AWS_ROLE_ARN,
+#                         VPC_ID, SUBNET_ID, BUCKET_SUFFIX
+#      tf-prod-vars     — same keys, different values
+#
+# 2. ADO Environments:
+#      nonprod.compute  — approval: platform-team group
+#      prod.compute     — approval: CAB group
+#                         branch control: refs/tags/release-*
+#                         business-hours gate (optional Azure Function)
+#
+# 3. Service connections (OIDC → IAM role per environment):
+#      sc-aws-nonprod   → role tf-nonprod-compute
+#      sc-aws-prod      → role tf-prod-compute
+# =============================================================================
+
+# ── Triggers ──────────────────────────────────────────────────────────────────
+
+trigger:
+  branches:
+    include:
+      - main                 # nonprod deploy on every merge to main
+  tags:
+    include:
+      - release-*            # prod deploy only from release-* tags
+
+pr:
+  branches:
+    include:
+      - main                 # CI gates run on every PR; no deployment
+
+# ── Global variables ──────────────────────────────────────────────────────────
+
+variables:
+  TF_VERSION:    "1.9.5"
+  COMPONENT:     "compute"
+  TFDOCS_VERSION: "0.18.0"
+  TFSEC_VERSION:  "1.28.6"
+
+# =============================================================================
+# STAGE 1 — CI quality gates  (parallel jobs, no cloud credentials)
+# Runs on: every PR + every push to main + every release-* tag
+# =============================================================================
+
+stages:
+
+# ── 1a. Format ────────────────────────────────────────────────────────────────
+- stage: CI
+  displayName: "CI — Quality Gates"
+  jobs:
+
+  - job: fmt
+    displayName: "fmt — terraform fmt -check"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - template: steps/install-terraform.yml   # shared step template (see below)
+    - script: terraform fmt -check -recursive
+      displayName: "terraform fmt -check -recursive"
+      workingDirectory: $(Build.SourcesDirectory)
+      failOnStderr: false
+
+  # ── 1b. Validate ─────────────────────────────────────────────────────────────
+  - job: validate
+    displayName: "validate — init -backend=false && validate"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - template: steps/install-terraform.yml
+    - script: |
+        set -e
+        for ENV in sandbox nonprod prod; do
+          echo "──── Validating environments/$ENV/$(COMPONENT) ────"
+          cd $(Build.SourcesDirectory)/environments/$ENV/$(COMPONENT)
+          terraform init -backend=false -input=false
+          terraform validate
+          cd $(Build.SourcesDirectory)
+        done
+      displayName: "Validate all environments"
+
+  # ── 1c. Lint (TFLint) ─────────────────────────────────────────────────────────
+  - job: lint
+    displayName: "lint — TFLint"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - script: |
+        curl -fsSL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+        tflint --version
+      displayName: "Install TFLint"
+    - script: |
+        set -e
+        tflint --init
+        for ENV in sandbox nonprod prod; do
+          echo "──── Linting environments/$ENV/$(COMPONENT) ────"
+          tflint --chdir environments/$ENV/$(COMPONENT)
+        done
+        # Also lint the modules
+        for MOD in modules/aws/ec2 modules/aws/s3; do
+          echo "──── Linting $MOD ────"
+          tflint --chdir $MOD
+        done
+      displayName: "TFLint — environments + modules"
+      workingDirectory: $(Build.SourcesDirectory)
+
+  # ── 1d. tfsec — static security scan ─────────────────────────────────────────
+  - job: tfsec
+    displayName: "tfsec — static security scan"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - script: |
+        curl -fsSL \
+          https://github.com/aquasecurity/tfsec/releases/download/v$(TFSEC_VERSION)/tfsec-linux-amd64 \
+          -o /usr/local/bin/tfsec
+        chmod +x /usr/local/bin/tfsec
+        tfsec --version
+      displayName: "Install tfsec v$(TFSEC_VERSION)"
+
+    - script: |
+        tfsec $(Build.SourcesDirectory) \
+          --format junit \
+          --out $(Common.TestResultsDirectory)/tfsec-results.xml \
+          --minimum-severity HIGH \
+          --no-color
+        tfsec $(Build.SourcesDirectory) \
+          --format sarif \
+          --out $(Build.ArtifactStagingDirectory)/tfsec.sarif \
+          --minimum-severity HIGH \
+          --no-color
+      displayName: "tfsec scan (HIGH+CRITICAL)"
+      continueOnError: false   # hard fail on HIGH/CRITICAL
+
+    - task: PublishTestResults@2
+      condition: always()
+      inputs:
+        testResultsFormat: JUnit
+        testResultsFiles: "$(Common.TestResultsDirectory)/tfsec-results.xml"
+        testRunTitle: "tfsec"
+
+    - task: PublishPipelineArtifact@1
+      condition: always()
+      inputs:
+        targetPath: $(Build.ArtifactStagingDirectory)/tfsec.sarif
+        artifact: "tfsec-sarif-$(Build.BuildId)"
+      displayName: "Publish tfsec SARIF (for Advanced Security)"
+
+  # ── 1e. Checkov — static security scan ───────────────────────────────────────
+  - job: checkov
+    displayName: "checkov — static security scan"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: "3.11"
+
+    - script: pip install --quiet checkov
+      displayName: "Install Checkov"
+
+    - script: |
+        checkov \
+          --directory $(Build.SourcesDirectory) \
+          --framework terraform \
+          --hard-fail-on HIGH,CRITICAL \
+          --compact \
+          --output junitxml \
+          --output-file-path $(Common.TestResultsDirectory)/checkov-results.xml
+      displayName: "Checkov scan (HIGH+CRITICAL)"
+
+    - task: PublishTestResults@2
+      condition: always()
+      inputs:
+        testResultsFormat: JUnit
+        testResultsFiles: "$(Common.TestResultsDirectory)/checkov-results.xml"
+        testRunTitle: "Checkov"
+
+  # ── 1f. terraform-docs — README drift check ───────────────────────────────────
+  - job: docs
+    displayName: "terraform-docs — README up to date"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - script: |
+        curl -fsSL \
+          https://github.com/terraform-docs/terraform-docs/releases/download/v$(TFDOCS_VERSION)/terraform-docs-v$(TFDOCS_VERSION)-linux-amd64.tar.gz \
+          | tar xz -C /tmp
+        sudo mv /tmp/terraform-docs /usr/local/bin/terraform-docs
+        terraform-docs --version
+      displayName: "Install terraform-docs v$(TFDOCS_VERSION)"
+
+    - script: |
+        set -e
+        CHANGED=0
+        for MOD in modules/aws/ec2 modules/aws/s3; do
+          echo "──── Checking $MOD/README.md ────"
+          # Regenerate docs into a temp file and diff against committed README
+          terraform-docs markdown table \
+            --output-file /tmp/README-generated.md \
+            --output-mode inject \
+            $(Build.SourcesDirectory)/$MOD
+          if ! diff -q $(Build.SourcesDirectory)/$MOD/README.md /tmp/README-generated.md > /dev/null 2>&1; then
+            echo "##vso[task.logissue type=error]$MOD/README.md is out of date. Run: terraform-docs markdown table --output-mode inject $MOD"
+            CHANGED=1
+          else
+            echo "$MOD/README.md is up to date."
+          fi
+        done
+        exit $CHANGED
+      displayName: "Check README.md not stale"
+      workingDirectory: $(Build.SourcesDirectory)
+
+# =============================================================================
+# STAGE 2 — Plan: nonprod
+# Runs on: push to main only (not PRs)
+# =============================================================================
+
+- stage: PlanNonprod
+  displayName: "Plan — nonprod"
+  dependsOn: CI
+  condition: |
+    and(
+      succeeded(),
+      ne(variables['Build.Reason'], 'PullRequest'),
+      not(startsWith(variables['Build.SourceBranch'], 'refs/tags/'))
+    )
+  variables:
+  - group: tf-nonprod-vars
+
+  jobs:
+  - job: plan
+    displayName: "terraform plan (nonprod)"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - template: steps/install-terraform.yml
+    - template: steps/tf-plan.yml
+      parameters:
+        environment: nonprod
+        component:   $(COMPONENT)
+
+# =============================================================================
+# STAGE 3 — Policy check: nonprod  (OPA/conftest on plan.json)
+# =============================================================================
+
+- stage: PolicyNonprod
+  displayName: "Policy check — nonprod"
+  dependsOn: PlanNonprod
+  condition: succeeded()
+  variables:
+  - group: tf-nonprod-vars
+
+  jobs:
+  - job: policy
+    displayName: "OPA/conftest (nonprod plan)"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - template: steps/policy-check.yml
+      parameters:
+        environment: nonprod
+        component:   $(COMPONENT)
+
+# =============================================================================
+# STAGE 4 — Apply: nonprod
+# Approval gate is on the ADO Environment nonprod.compute (platform-team).
+# =============================================================================
+
+- stage: ApplyNonprod
+  displayName: "Apply — nonprod"
+  dependsOn: PolicyNonprod
+  condition: succeeded()
+  variables:
+  - group: tf-nonprod-vars
+
+  jobs:
+  - deployment: apply
+    displayName: "terraform apply (nonprod)"
+    pool:
+      vmImage: ubuntu-latest
+    environment: "nonprod.$(COMPONENT)"       # ← approval gate lives here
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - template: steps/install-terraform.yml
+          - template: steps/tf-apply.yml
+            parameters:
+              environment: nonprod
+              component:   $(COMPONENT)
+
+# =============================================================================
+# STAGE 5 — Plan: prod
+# Only runs:
+#   • After nonprod apply succeeds
+#   • AND source ref is a release-* tag  (enforced by condition + ADO branch control)
+# =============================================================================
+
+- stage: PlanProd
+  displayName: "Plan — prod"
+  dependsOn: ApplyNonprod
+  condition: |
+    and(
+      succeeded(),
+      startsWith(variables['Build.SourceBranch'], 'refs/tags/release-')
+    )
+  variables:
+  - group: tf-prod-vars
+
+  jobs:
+  - job: plan
+    displayName: "terraform plan (prod)"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - template: steps/install-terraform.yml
+    - template: steps/tf-plan.yml
+      parameters:
+        environment: prod
+        component:   $(COMPONENT)
+
+# =============================================================================
+# STAGE 6 — Policy check: prod
+# =============================================================================
+
+- stage: PolicyProd
+  displayName: "Policy check — prod"
+  dependsOn: PlanProd
+  condition: succeeded()
+  variables:
+  - group: tf-prod-vars
+
+  jobs:
+  - job: policy
+    displayName: "OPA/conftest (prod plan)"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - template: steps/policy-check.yml
+      parameters:
+        environment: prod
+        component:   $(COMPONENT)
+
+# =============================================================================
+# STAGE 7 — Apply: prod
+# Approval gate is on the ADO Environment prod.compute:
+#   - Approvers: CAB group
+#   - Branch control: refs/tags/release-*  (double enforcement)
+#   - Optional: business-hours Azure Function gate
+# =============================================================================
+
+- stage: ApplyProd
+  displayName: "Apply — prod"
+  dependsOn: PolicyProd
+  condition: succeeded()
+  variables:
+  - group: tf-prod-vars
+
+  jobs:
+  - deployment: apply
+    displayName: "terraform apply (prod)"
+    pool:
+      vmImage: ubuntu-latest
+    environment: "prod.$(COMPONENT)"          # ← CAB approval gate lives here
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - template: steps/install-terraform.yml
+          - template: steps/tf-apply.yml
+            parameters:
+              environment: prod
+              component:   $(COMPONENT)
+
+# =============================================================================
+# STAGE 8 — Evidence capture
+# Publishes outputs, plan summary, and release record for audit.
+# =============================================================================
+
+- stage: Evidence
+  displayName: "Evidence capture"
+  dependsOn:
+    - ApplyNonprod
+    - ApplyProd
+  condition: |
+    and(
+      not(failed()),
+      not(canceled())
+    )
+
+  jobs:
+  - job: record
+    displayName: "Release record"
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+
+    - task: DownloadPipelineArtifact@2
+      continueOnError: true
+      inputs:
+        artifact: "evidence-nonprod-$(COMPONENT)-$(Build.BuildId)"
+        path: $(Pipeline.Workspace)/evidence-nonprod
+
+    - task: DownloadPipelineArtifact@2
+      continueOnError: true
+      inputs:
+        artifact: "evidence-prod-$(COMPONENT)-$(Build.BuildId)"
+        path: $(Pipeline.Workspace)/evidence-prod
+
+    - script: |
+        echo "============================================"
+        echo "  RELEASE RECORD"
+        echo "============================================"
+        echo "Pipeline    : $(Build.DefinitionName)"
+        echo "Build ID    : $(Build.BuildId)"
+        echo "Source ref  : $(Build.SourceBranch)"
+        echo "Triggered by: $(Build.RequestedFor)"
+        echo "Date (UTC)  : $(date -u)"
+        echo "--------------------------------------------"
+        echo "NONPROD outputs:"
+        cat $(Pipeline.Workspace)/evidence-nonprod/outputs.json 2>/dev/null || echo "(skipped)"
+        echo "--------------------------------------------"
+        echo "PROD outputs:"
+        cat $(Pipeline.Workspace)/evidence-prod/outputs.json    2>/dev/null || echo "(skipped)"
+        echo "--------------------------------------------"
+        echo "Plan summary (nonprod):"
+        grep -E "Plan:|No changes|Apply complete" \
+          $(Pipeline.Workspace)/evidence-nonprod/plan.txt 2>/dev/null || echo "(not available)"
+        echo "Plan summary (prod):"
+        grep -E "Plan:|No changes|Apply complete" \
+          $(Pipeline.Workspace)/evidence-prod/plan.txt 2>/dev/null || echo "(not available)"
+        # Production: additionally POST to ServiceNow / ADO Wiki API here.
+      displayName: "Print release record"
+
+# =============================================================================
+# STAGE 9 — Drift detection  (nightly schedule only)
+# terraform plan -detailed-exitcode against both nonprod and prod.
+# Exit 0 = clean. Exit 2 = drift → warns + would open a ticket.
+# =============================================================================
+
+- stage: DriftCheck
+  displayName: "Drift detection (nightly)"
+  dependsOn: []                              # independent of all other stages
+  condition: eq(variables['Build.Reason'], 'Schedule')
+
+  jobs:
+
+  - job: drift_nonprod
+    displayName: "Drift — nonprod"
+    pool:
+      vmImage: ubuntu-latest
+    variables:
+    - group: tf-nonprod-vars
+    steps:
+    - template: steps/install-terraform.yml
+    - template: steps/drift-check.yml
+      parameters:
+        environment: nonprod
+        component:   $(COMPONENT)
+
+  - job: drift_prod
+    displayName: "Drift — prod"
+    pool:
+      vmImage: ubuntu-latest
+    variables:
+    - group: tf-prod-vars
+    steps:
+    - template: steps/install-terraform.yml
+    - template: steps/drift-check.yml
+      parameters:
+        environment: prod
+        component:   $(COMPONENT)

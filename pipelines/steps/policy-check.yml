@@ -1,0 +1,37 @@
+# steps/policy-check.yml
+# OPA/conftest policy check on the saved plan.json.
+# Must run AFTER the plan artifact has been published.
+
+parameters:
+- name: environment
+  type: string
+- name: component
+  type: string
+
+steps:
+
+- task: DownloadPipelineArtifact@2
+  displayName: "Download plan artifact"
+  inputs:
+    artifact: "plan-${{ parameters.environment }}-${{ parameters.component }}-$(Build.BuildId)"
+    path:     $(Pipeline.Workspace)/plan-artifact
+
+- script: |
+    curl -fsSL \
+      https://github.com/open-policy-agent/conftest/releases/download/v0.52.0/conftest_0.52.0_Linux_x86_64.tar.gz \
+      | tar xz -C /tmp
+    sudo mv /tmp/conftest /usr/local/bin/conftest
+    conftest --version
+  displayName: "Install conftest"
+
+# Two layers of policy checks:
+# 1. Static: Checkov/tfsec already ran on HCL source in CI.
+# 2. Runtime (here): conftest on plan.json — sees RESOLVED values after variable
+#    substitution (final CIDRs, actual encryption flags, etc.). Stronger than static.
+- script: |
+    conftest test \
+      $(Pipeline.Workspace)/plan-artifact/plan.json \
+      --policy $(Build.SourcesDirectory)/policies/ \
+      --namespace terraform \
+      --output table
+  displayName: "OPA/conftest policy check on plan.json"

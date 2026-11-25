@@ -1,0 +1,86 @@
+# steps/tf-plan.yml
+# Reusable plan step template.
+# Parameters:
+#   environment  — sandbox | nonprod | prod
+#   component    — subfolder under environments/<env>/
+
+parameters:
+- name: environment
+  type: string
+- name: component
+  type: string
+
+steps:
+
+# ── Write backend.hcl from Key Vault variable group ───────────────────────────
+# Variables (TF_STATE_BUCKET, TF_LOCK_TABLE, etc.) come from the variable group
+# declared on the calling stage — never hard-coded here.
+- script: |
+    cat > backend.hcl <<EOF
+    bucket         = "$(TF_STATE_BUCKET)"
+    key            = "${{ parameters.environment }}/${{ parameters.component }}/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "$(TF_LOCK_TABLE)"
+    encrypt        = true
+    EOF
+  displayName: "Generate backend.hcl"
+  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+
+# ── Write auto.tfvars from Key Vault variables ────────────────────────────────
+- script: |
+    cat > pipeline.auto.tfvars <<EOF
+    vpc_id        = "$(VPC_ID)"
+    subnet_id     = "$(SUBNET_ID)"
+    bucket_suffix = "$(BUCKET_SUFFIX)"
+    EOF
+  displayName: "Generate pipeline.auto.tfvars"
+  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+
+# ── Init ──────────────────────────────────────────────────────────────────────
+- script: terraform init -input=false -backend-config=backend.hcl
+  displayName: "terraform init"
+  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+  env:
+    AWS_ROLE_ARN:                 $(AWS_ROLE_ARN)
+    AWS_WEB_IDENTITY_TOKEN_FILE:  $(AGENT_TEMPDIRECTORY)/oidc-token
+
+# ── Plan (-detailed-exitcode) ─────────────────────────────────────────────────
+# Exit 0 = no changes (warn, but don't fail — a clean plan is valid)
+# Exit 1 = error      (hard fail)
+# Exit 2 = changes present (success — this is the normal deploy case)
+- script: |
+    set +e
+    terraform plan \
+      -detailed-exitcode \
+      -input=false \
+      -out=$(Build.ArtifactStagingDirectory)/tfplan
+    EXIT=$?
+
+    if   [ $EXIT -eq 1 ]; then
+      echo "##vso[task.logissue type=error]terraform plan failed (exit 1)"
+      exit 1
+    elif [ $EXIT -eq 0 ]; then
+      echo "##vso[task.logissue type=warning]No changes detected — verify this is expected."
+    fi
+
+    # Produce human-readable and machine-readable plan files
+    terraform show -no-color $(Build.ArtifactStagingDirectory)/tfplan \
+      > $(Build.ArtifactStagingDirectory)/plan.txt
+    terraform show -json $(Build.ArtifactStagingDirectory)/tfplan \
+      > $(Build.ArtifactStagingDirectory)/plan.json
+
+    echo "──── Plan summary ────"
+    grep -E "^Plan:|No changes" $(Build.ArtifactStagingDirectory)/plan.txt || true
+  displayName: "terraform plan -detailed-exitcode"
+  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+  env:
+    AWS_ROLE_ARN:                $(AWS_ROLE_ARN)
+    AWS_WEB_IDENTITY_TOKEN_FILE: $(AGENT_TEMPDIRECTORY)/oidc-token
+
+# ── Publish plan artifact ─────────────────────────────────────────────────────
+# This is what approvers review before clicking Approve on the environment gate.
+- task: PublishPipelineArtifact@1
+  displayName: "Publish plan artifact"
+  inputs:
+    targetPath: $(Build.ArtifactStagingDirectory)
+    artifact:   "plan-${{ parameters.environment }}-${{ parameters.component }}-$(Build.BuildId)"

@@ -1,0 +1,24 @@
+# Terraform local state and cache
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+plan.json
+plan.txt
+outputs.json
+
+# Backend and secret variable files — NEVER commit these
+backend.hcl
+*.tfvars
+!*.tfvars.example
+
+# Crash log
+crash.log
+
+# Provider lockfile SHOULD be committed — do NOT ignore:
+# .terraform.lock.hcl  ← intentionally NOT listed here
+
+# IDE
+.idea/
+.vscode/
+*.swp

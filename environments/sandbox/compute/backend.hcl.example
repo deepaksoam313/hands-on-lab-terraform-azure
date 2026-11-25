@@ -1,0 +1,8 @@
+# Copy this file to backend.hcl and fill in real values.
+# backend.hcl is in .gitignore — never commit real bucket names with account IDs.
+
+bucket         = "YOUR-TFSTATE-BUCKET-NAME"      # e.g. acme-platform-tfstate-use1
+key            = "sandbox/compute/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "YOUR-LOCK-TABLE-NAME"           # e.g. acme-tf-locks
+encrypt        = true
