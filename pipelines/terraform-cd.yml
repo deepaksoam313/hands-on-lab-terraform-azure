@@ -279,6 +279,7 @@ stages:
       runOnce:
         deploy:
           steps:
+          - checkout: self
           - template: steps/install-terraform.yml
           - template: steps/tf-apply.yml
             parameters:
@@ -362,6 +363,7 @@ stages:
       runOnce:
         deploy:
           steps:
+          - checkout: self
           - template: steps/install-terraform.yml
           - template: steps/tf-apply.yml
             parameters:
