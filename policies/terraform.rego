@@ -88,16 +88,18 @@ deny[msg] {
   change := resource_changes[_]
   change.type == "aws_s3_bucket_public_access_block"
   after := change.change.after
-  not (
-    after.block_public_acls       == true
-    after.block_public_policy     == true
-    after.ignore_public_acls      == true
-    after.restrict_public_buckets == true
-  )
+  not all_public_access_blocked(after)
   msg := sprintf(
     "DENY [S3-PUBLIC-BLOCK] aws_s3_bucket_public_access_block '%s': all four public-access-block settings must be true",
     [change.address]
   )
+}
+
+all_public_access_blocked(after) {
+  after.block_public_acls       == true
+  after.block_public_policy     == true
+  after.ignore_public_acls      == true
+  after.restrict_public_buckets == true
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
