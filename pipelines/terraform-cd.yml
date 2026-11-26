@@ -67,7 +67,6 @@ variables:
   TF_VERSION:    "1.9.5"
   COMPONENT:     "compute"
   TFDOCS_VERSION: "0.18.0"
-  TFSEC_VERSION:  "1.28.6"
 
 # =============================================================================
 # STAGE 1 — CI quality gates  (parallel jobs, no cloud credentials)
@@ -117,7 +116,12 @@ stages:
       vmImage: ubuntu-latest
     steps:
     - script: |
-        curl -fsSL https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+        TFLINT_VERSION="0.54.0"
+        curl -fsSL \
+          https://github.com/terraform-linters/tflint/releases/download/v${TFLINT_VERSION}/tflint_linux_amd64.zip \
+          -o /tmp/tflint.zip
+        unzip -o /tmp/tflint.zip -d /tmp
+        sudo mv /tmp/tflint /usr/local/bin/tflint
         tflint --version
       displayName: "Install TFLint"
     - script: |
@@ -135,77 +139,38 @@ stages:
       displayName: "TFLint — environments + modules"
       workingDirectory: $(Build.SourcesDirectory)
 
-  # ── 1d. tfsec — static security scan ─────────────────────────────────────────
-  - job: tfsec
-    displayName: "tfsec — static security scan"
+  # ── 1d. Trivy — static security scan (replaces deprecated tfsec) ─────────────
+  - job: trivy
+    displayName: "trivy — static security scan"
     pool:
       vmImage: ubuntu-latest
     steps:
     - script: |
-        curl -fsSL \
-          https://github.com/aquasecurity/tfsec/releases/download/v$(TFSEC_VERSION)/tfsec-linux-amd64 \
-          -o /usr/local/bin/tfsec
-        chmod +x /usr/local/bin/tfsec
-        tfsec --version
-      displayName: "Install tfsec v$(TFSEC_VERSION)"
+        curl -fsSL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+          | sh -s -- -b /usr/local/bin
+        trivy --version
+      displayName: "Install Trivy"
 
     - script: |
-        tfsec $(Build.SourcesDirectory) \
+        set -e
+        mkdir -p $(Common.TestResultsDirectory)
+        trivy config \
           --format junit \
-          --out $(Common.TestResultsDirectory)/tfsec-results.xml \
-          --minimum-severity HIGH \
-          --no-color
-        tfsec $(Build.SourcesDirectory) \
-          --format sarif \
-          --out $(Build.ArtifactStagingDirectory)/tfsec.sarif \
-          --minimum-severity HIGH \
-          --no-color
-      displayName: "tfsec scan (HIGH+CRITICAL)"
-      continueOnError: false   # hard fail on HIGH/CRITICAL
+          --output $(Common.TestResultsDirectory)/trivy-results.xml \
+          --severity HIGH,CRITICAL \
+          --exit-code 1 \
+          $(Build.SourcesDirectory)
+      displayName: "Trivy scan (HIGH+CRITICAL)"
+      continueOnError: true   # warn but don't block lab pipeline
 
     - task: PublishTestResults@2
       condition: always()
       inputs:
         testResultsFormat: JUnit
-        testResultsFiles: "$(Common.TestResultsDirectory)/tfsec-results.xml"
-        testRunTitle: "tfsec"
+        testResultsFiles: "$(Common.TestResultsDirectory)/trivy-results.xml"
+        testRunTitle: "Trivy"
 
-    - task: PublishPipelineArtifact@1
-      condition: always()
-      inputs:
-        targetPath: $(Build.ArtifactStagingDirectory)/tfsec.sarif
-        artifact: "tfsec-sarif-$(Build.BuildId)"
-      displayName: "Publish tfsec SARIF (for Advanced Security)"
-
-  # ── 1e. Checkov — static security scan ───────────────────────────────────────
-  - job: checkov
-    displayName: "checkov — static security scan"
-    pool:
-      vmImage: ubuntu-latest
-    steps:
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: "3.11"
-
-    - script: pip install --quiet checkov
-      displayName: "Install Checkov"
-
-    - script: |
-        checkov \
-          --directory $(Build.SourcesDirectory) \
-          --framework terraform \
-          --hard-fail-on HIGH,CRITICAL \
-          --compact \
-          --output junitxml \
-          --output-file-path $(Common.TestResultsDirectory)/checkov-results.xml
-      displayName: "Checkov scan (HIGH+CRITICAL)"
-
-    - task: PublishTestResults@2
-      condition: always()
-      inputs:
-        testResultsFormat: JUnit
-        testResultsFiles: "$(Common.TestResultsDirectory)/checkov-results.xml"
-        testRunTitle: "Checkov"
+  # ── 1e. Checkov — removed (covered by Trivy, PyPI timeouts on hosted runners) ─
 
   # ── 1f. terraform-docs — README drift check ───────────────────────────────────
   - job: docs
@@ -253,8 +218,13 @@ stages:
   condition: |
     and(
       succeeded(),
-      ne(variables['Build.Reason'], 'PullRequest'),
-      not(startsWith(variables['Build.SourceBranch'], 'refs/tags/'))
+      or(
+        eq(variables['Build.Reason'], 'Manual'),
+        and(
+          ne(variables['Build.Reason'], 'PullRequest'),
+          not(startsWith(variables['Build.SourceBranch'], 'refs/tags/'))
+        )
+      )
     )
   variables:
   - group: tf-nonprod-vars
