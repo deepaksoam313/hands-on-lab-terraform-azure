@@ -310,7 +310,7 @@ stages:
     displayName: "terraform apply (nonprod)"
     pool:
       vmImage: ubuntu-latest
-    environment: "nonprod.$(COMPONENT)"       # ← approval gate lives here
+    environment: "nonprod_$(COMPONENT)"       # ← approval gate lives here
     strategy:
       runOnce:
         deploy:
@@ -393,7 +393,7 @@ stages:
     displayName: "terraform apply (prod)"
     pool:
       vmImage: ubuntu-latest
-    environment: "prod.$(COMPONENT)"          # ← CAB approval gate lives here
+    environment: "prod_$(COMPONENT)"          # ← CAB approval gate lives here
     strategy:
       runOnce:
         deploy:
