@@ -40,14 +40,14 @@ data "aws_iam_policy_document" "assume_nonprod" {
       test     = "StringLike"
       variable = "vstoken.dev.azure.com/${var.ado_org_name}:sub"
       # Only the iac-platform project's pipelines can assume this role
-      values   = ["sc://${var.ado_org_name}/${var.ado_project_name}/*"]
+      values = ["sc://${var.ado_org_name}/${var.ado_project_name}/*"]
     }
   }
 }
 
 resource "aws_iam_role" "tf_nonprod" {
-  name               = "tf-nonprod-compute"
-  assume_role_policy = data.aws_iam_policy_document.assume_nonprod.json
+  name                 = "tf-nonprod-compute"
+  assume_role_policy   = data.aws_iam_policy_document.assume_nonprod.json
   max_session_duration = 3600
 
   tags = { managed-by = "terraform", env = "nonprod" }
@@ -115,8 +115,8 @@ data "aws_iam_policy_document" "assume_prod" {
 }
 
 resource "aws_iam_role" "tf_prod" {
-  name               = "tf-prod-compute"
-  assume_role_policy = data.aws_iam_policy_document.assume_prod.json
+  name                 = "tf-prod-compute"
+  assume_role_policy   = data.aws_iam_policy_document.assume_prod.json
   max_session_duration = 3600
 
   tags = { managed-by = "terraform", env = "prod" }
@@ -159,4 +159,4 @@ resource "aws_iam_role_policy" "tf_prod_policy" {
 }
 
 output "nonprod_role_arn" { value = aws_iam_role.tf_nonprod.arn }
-output "prod_role_arn"    { value = aws_iam_role.tf_prod.arn }
+output "prod_role_arn" { value = aws_iam_role.tf_prod.arn }
