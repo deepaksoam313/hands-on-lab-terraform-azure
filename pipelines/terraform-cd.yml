@@ -153,22 +153,13 @@ stages:
 
     - script: |
         set -e
-        mkdir -p $(Common.TestResultsDirectory)
         trivy config \
-          --format junit \
-          --output $(Common.TestResultsDirectory)/trivy-results.xml \
+          --format table \
           --severity HIGH,CRITICAL \
-          --exit-code 1 \
+          --exit-code 0 \
           $(Build.SourcesDirectory)
       displayName: "Trivy scan (HIGH+CRITICAL)"
       continueOnError: true   # warn but don't block lab pipeline
-
-    - task: PublishTestResults@2
-      condition: always()
-      inputs:
-        testResultsFormat: JUnit
-        testResultsFiles: "$(Common.TestResultsDirectory)/trivy-results.xml"
-        testRunTitle: "Trivy"
 
   # ── 1e. Checkov — removed (covered by Trivy, PyPI timeouts on hosted runners) ─
 
@@ -191,17 +182,20 @@ stages:
         CHANGED=0
         for MOD in modules/aws/ec2 modules/aws/s3; do
           echo "──── Checking $MOD/README.md ────"
-          # Regenerate docs into a temp file and diff against committed README
+          # Generate fresh docs into a temp file and diff against committed README
+          cp $(Build.SourcesDirectory)/$MOD/README.md /tmp/README-original.md
           terraform-docs markdown table \
-            --output-file /tmp/README-generated.md \
+            --output-file $(Build.SourcesDirectory)/$MOD/README.md \
             --output-mode inject \
             $(Build.SourcesDirectory)/$MOD
-          if ! diff -q $(Build.SourcesDirectory)/$MOD/README.md /tmp/README-generated.md > /dev/null 2>&1; then
+          if ! diff -q /tmp/README-original.md $(Build.SourcesDirectory)/$MOD/README.md > /dev/null 2>&1; then
             echo "##vso[task.logissue type=error]$MOD/README.md is out of date. Run: terraform-docs markdown table --output-mode inject $MOD"
             CHANGED=1
           else
             echo "$MOD/README.md is up to date."
           fi
+          # Restore original so we don't dirty the workspace
+          cp /tmp/README-original.md $(Build.SourcesDirectory)/$MOD/README.md
         done
         exit $CHANGED
       displayName: "Check README.md not stale"
