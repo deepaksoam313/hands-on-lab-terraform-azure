@@ -19,12 +19,18 @@ steps:
     dynamodb_table = "$(TF_LOCK_TABLE)"
     encrypt        = true
     EOF
-    terraform init -input=false -backend-config=backend.hcl
-  displayName: "terraform init (apply agent)"
+  displayName: "Generate backend.hcl"
   workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
-  env:
-    AWS_ROLE_ARN:                $(AWS_ROLE_ARN)
-    AWS_WEB_IDENTITY_TOKEN_FILE: $(AGENT_TEMPDIRECTORY)/oidc-token
+
+- task: AWSShellScript@1
+  displayName: "terraform init (apply agent)"
+  inputs:
+    awsCredentials: "sc-aws-${{ parameters.environment }}"
+    regionName: "us-east-1"
+    scriptType: "inline"
+    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+    inlineScript: |
+      terraform init -input=false -backend-config=backend.hcl
 
 # ── Download the exact plan from the Plan stage ───────────────────────────────
 - task: DownloadPipelineArtifact@2
@@ -34,29 +40,33 @@ steps:
     path:     $(Pipeline.Workspace)/plan-artifact
 
 # ── Apply the saved plan ──────────────────────────────────────────────────────
-- script: |
-    terraform apply \
-      -input=false \
-      $(Pipeline.Workspace)/plan-artifact/tfplan
+- task: AWSShellScript@1
   displayName: "terraform apply (saved plan)"
-  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
-  env:
-    AWS_ROLE_ARN:                $(AWS_ROLE_ARN)
-    AWS_WEB_IDENTITY_TOKEN_FILE: $(AGENT_TEMPDIRECTORY)/oidc-token
+  inputs:
+    awsCredentials: "sc-aws-${{ parameters.environment }}"
+    regionName: "us-east-1"
+    scriptType: "inline"
+    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+    inlineScript: |
+      terraform apply \
+        -input=false \
+        $(Pipeline.Workspace)/plan-artifact/tfplan
 
 # ── Capture outputs for evidence ─────────────────────────────────────────────
-- script: |
-    terraform output -json \
-      > $(Build.ArtifactStagingDirectory)/outputs.json
-    echo "──── Outputs ────"
-    cat $(Build.ArtifactStagingDirectory)/outputs.json
+- task: AWSShellScript@1
   displayName: "terraform output -json"
-  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
-  env:
-    AWS_ROLE_ARN:                $(AWS_ROLE_ARN)
-    AWS_WEB_IDENTITY_TOKEN_FILE: $(AGENT_TEMPDIRECTORY)/oidc-token
+  inputs:
+    awsCredentials: "sc-aws-${{ parameters.environment }}"
+    regionName: "us-east-1"
+    scriptType: "inline"
+    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+    inlineScript: |
+      terraform output -json \
+        > $(Build.ArtifactStagingDirectory)/outputs.json
+      echo "──── Outputs ────"
+      cat $(Build.ArtifactStagingDirectory)/outputs.json
 
-# ── Copy plan.txt into evidence so the Evidence stage can grep it ─────────────
+# ── Copy plan.txt into evidence ───────────────────────────────────────────────
 - script: |
     cp $(Pipeline.Workspace)/plan-artifact/plan.txt \
        $(Build.ArtifactStagingDirectory)/plan.txt 2>/dev/null || true

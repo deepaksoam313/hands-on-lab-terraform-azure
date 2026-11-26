@@ -23,32 +23,40 @@ steps:
     subnet_id     = "$(SUBNET_ID)"
     bucket_suffix = "$(BUCKET_SUFFIX)"
     EOF
-    terraform init -input=false -backend-config=backend.hcl
+  displayName: "Generate backend.hcl and tfvars"
+  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+
+- task: AWSShellScript@1
   displayName: "Init (${{ parameters.environment }})"
-  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
-  env:
-    AWS_ROLE_ARN:                $(AWS_ROLE_ARN)
-    AWS_WEB_IDENTITY_TOKEN_FILE: $(AGENT_TEMPDIRECTORY)/oidc-token
+  inputs:
+    awsCredentials: "sc-aws-${{ parameters.environment }}"
+    regionName: "us-east-1"
+    scriptType: "inline"
+    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+    inlineScript: |
+      terraform init -input=false -backend-config=backend.hcl
 
-- script: |
-    set +e
-    terraform plan -detailed-exitcode -input=false -out=drift.tfplan
-    EXIT=$?
-
-    if [ $EXIT -eq 0 ]; then
-      echo "No drift in ${{ parameters.environment }}/$(COMPONENT). Clean."
-
-    elif [ $EXIT -eq 2 ]; then
-      echo "##vso[task.logissue type=warning]DRIFT DETECTED: ${{ parameters.environment }}/$(COMPONENT)"
-      terraform show -no-color drift.tfplan
-      # Production: POST to ServiceNow or Teams webhook here.
-
-    else
-      echo "##vso[task.logissue type=error]Plan error during drift check (exit $EXIT)"
-      exit 1
-    fi
+- task: AWSShellScript@1
   displayName: "Drift plan — ${{ parameters.environment }}"
-  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
-  env:
-    AWS_ROLE_ARN:                $(AWS_ROLE_ARN)
-    AWS_WEB_IDENTITY_TOKEN_FILE: $(AGENT_TEMPDIRECTORY)/oidc-token
+  inputs:
+    awsCredentials: "sc-aws-${{ parameters.environment }}"
+    regionName: "us-east-1"
+    scriptType: "inline"
+    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+    inlineScript: |
+      set +e
+      terraform plan -detailed-exitcode -input=false -out=drift.tfplan
+      EXIT=$?
+
+      if [ $EXIT -eq 0 ]; then
+        echo "No drift in ${{ parameters.environment }}/$(COMPONENT). Clean."
+
+      elif [ $EXIT -eq 2 ]; then
+        echo "##vso[task.logissue type=warning]DRIFT DETECTED: ${{ parameters.environment }}/$(COMPONENT)"
+        terraform show -no-color drift.tfplan
+        # Production: POST to ServiceNow or Teams webhook here.
+
+      else
+        echo "##vso[task.logissue type=error]Plan error during drift check (exit $EXIT)"
+        exit 1
+      fi

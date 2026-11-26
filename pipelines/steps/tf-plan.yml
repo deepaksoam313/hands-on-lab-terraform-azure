@@ -12,9 +12,7 @@ parameters:
 
 steps:
 
-# ── Write backend.hcl from Key Vault variable group ───────────────────────────
-# Variables (TF_STATE_BUCKET, TF_LOCK_TABLE, etc.) come from the variable group
-# declared on the calling stage — never hard-coded here.
+# ── Write backend.hcl from variable group ─────────────────────────────────────
 - script: |
     cat > backend.hcl <<EOF
     bucket         = "$(TF_STATE_BUCKET)"
@@ -26,7 +24,7 @@ steps:
   displayName: "Generate backend.hcl"
   workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
 
-# ── Write auto.tfvars from Key Vault variables ────────────────────────────────
+# ── Write auto.tfvars from variable group ─────────────────────────────────────
 - script: |
     cat > pipeline.auto.tfvars <<EOF
     vpc_id        = "$(VPC_ID)"
@@ -37,48 +35,49 @@ steps:
   workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
 
 # ── Init ──────────────────────────────────────────────────────────────────────
-- script: terraform init -input=false -backend-config=backend.hcl
+- task: AWSShellScript@1
   displayName: "terraform init"
-  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
-  env:
-    AWS_ROLE_ARN:                 $(AWS_ROLE_ARN)
-    AWS_WEB_IDENTITY_TOKEN_FILE:  $(AGENT_TEMPDIRECTORY)/oidc-token
+  inputs:
+    awsCredentials: "sc-aws-${{ parameters.environment }}"
+    regionName: "us-east-1"
+    scriptType: "inline"
+    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+    inlineScript: |
+      terraform init -input=false -backend-config=backend.hcl
 
 # ── Plan (-detailed-exitcode) ─────────────────────────────────────────────────
-# Exit 0 = no changes (warn, but don't fail — a clean plan is valid)
-# Exit 1 = error      (hard fail)
-# Exit 2 = changes present (success — this is the normal deploy case)
-- script: |
-    set +e
-    terraform plan \
-      -detailed-exitcode \
-      -input=false \
-      -out=$(Build.ArtifactStagingDirectory)/tfplan
-    EXIT=$?
-
-    if   [ $EXIT -eq 1 ]; then
-      echo "##vso[task.logissue type=error]terraform plan failed (exit 1)"
-      exit 1
-    elif [ $EXIT -eq 0 ]; then
-      echo "##vso[task.logissue type=warning]No changes detected — verify this is expected."
-    fi
-
-    # Produce human-readable and machine-readable plan files
-    terraform show -no-color $(Build.ArtifactStagingDirectory)/tfplan \
-      > $(Build.ArtifactStagingDirectory)/plan.txt
-    terraform show -json $(Build.ArtifactStagingDirectory)/tfplan \
-      > $(Build.ArtifactStagingDirectory)/plan.json
-
-    echo "──── Plan summary ────"
-    grep -E "^Plan:|No changes" $(Build.ArtifactStagingDirectory)/plan.txt || true
+# Exit 0 = no changes, Exit 1 = error, Exit 2 = changes present (normal)
+- task: AWSShellScript@1
   displayName: "terraform plan -detailed-exitcode"
-  workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
-  env:
-    AWS_ROLE_ARN:                $(AWS_ROLE_ARN)
-    AWS_WEB_IDENTITY_TOKEN_FILE: $(AGENT_TEMPDIRECTORY)/oidc-token
+  inputs:
+    awsCredentials: "sc-aws-${{ parameters.environment }}"
+    regionName: "us-east-1"
+    scriptType: "inline"
+    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+    inlineScript: |
+      set +e
+      terraform plan \
+        -detailed-exitcode \
+        -input=false \
+        -out=$(Build.ArtifactStagingDirectory)/tfplan
+      EXIT=$?
+
+      if   [ $EXIT -eq 1 ]; then
+        echo "##vso[task.logissue type=error]terraform plan failed (exit 1)"
+        exit 1
+      elif [ $EXIT -eq 0 ]; then
+        echo "##vso[task.logissue type=warning]No changes detected — verify this is expected."
+      fi
+
+      terraform show -no-color $(Build.ArtifactStagingDirectory)/tfplan \
+        > $(Build.ArtifactStagingDirectory)/plan.txt
+      terraform show -json $(Build.ArtifactStagingDirectory)/tfplan \
+        > $(Build.ArtifactStagingDirectory)/plan.json
+
+      echo "──── Plan summary ────"
+      grep -E "^Plan:|No changes" $(Build.ArtifactStagingDirectory)/plan.txt || true
 
 # ── Publish plan artifact ─────────────────────────────────────────────────────
-# This is what approvers review before clicking Approve on the environment gate.
 - task: PublishPipelineArtifact@1
   displayName: "Publish plan artifact"
   inputs:
