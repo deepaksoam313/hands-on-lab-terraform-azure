@@ -41,20 +41,19 @@ steps:
     awsCredentials: "sc-aws-${{ parameters.environment }}"
     regionName: "us-east-1"
     scriptType: "inline"
-    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
     inlineScript: |
+      cd $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
       terraform init -input=false -backend-config=backend.hcl
 
 # ── Plan (-detailed-exitcode) ─────────────────────────────────────────────────
-# Exit 0 = no changes, Exit 1 = error, Exit 2 = changes present (normal)
 - task: AWSShellScript@1
   displayName: "terraform plan -detailed-exitcode"
   inputs:
     awsCredentials: "sc-aws-${{ parameters.environment }}"
     regionName: "us-east-1"
     scriptType: "inline"
-    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
     inlineScript: |
+      cd $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
       set +e
       terraform plan \
         -detailed-exitcode \

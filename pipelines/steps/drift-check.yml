@@ -1,6 +1,5 @@
 # steps/drift-check.yml
 # Nightly drift detection — terraform plan -detailed-exitcode.
-# Exit 0 = clean. Exit 2 = drift detected (warn + would open a ticket).
 
 parameters:
 - name: environment
@@ -32,8 +31,8 @@ steps:
     awsCredentials: "sc-aws-${{ parameters.environment }}"
     regionName: "us-east-1"
     scriptType: "inline"
-    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
     inlineScript: |
+      cd $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
       terraform init -input=false -backend-config=backend.hcl
 
 - task: AWSShellScript@1
@@ -42,20 +41,17 @@ steps:
     awsCredentials: "sc-aws-${{ parameters.environment }}"
     regionName: "us-east-1"
     scriptType: "inline"
-    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
     inlineScript: |
+      cd $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
       set +e
       terraform plan -detailed-exitcode -input=false -out=drift.tfplan
       EXIT=$?
 
       if [ $EXIT -eq 0 ]; then
         echo "No drift in ${{ parameters.environment }}/$(COMPONENT). Clean."
-
       elif [ $EXIT -eq 2 ]; then
         echo "##vso[task.logissue type=warning]DRIFT DETECTED: ${{ parameters.environment }}/$(COMPONENT)"
         terraform show -no-color drift.tfplan
-        # Production: POST to ServiceNow or Teams webhook here.
-
       else
         echo "##vso[task.logissue type=error]Plan error during drift check (exit $EXIT)"
         exit 1

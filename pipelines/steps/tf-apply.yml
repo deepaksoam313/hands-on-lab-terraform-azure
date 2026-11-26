@@ -1,6 +1,5 @@
 # steps/tf-apply.yml
 # Apply the SAVED plan — not a re-plan.
-# This guarantees the diff an approver reviewed is exactly what runs.
 
 parameters:
 - name: environment
@@ -28,8 +27,8 @@ steps:
     awsCredentials: "sc-aws-${{ parameters.environment }}"
     regionName: "us-east-1"
     scriptType: "inline"
-    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
     inlineScript: |
+      cd $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
       terraform init -input=false -backend-config=backend.hcl
 
 # ── Download the exact plan from the Plan stage ───────────────────────────────
@@ -46,8 +45,8 @@ steps:
     awsCredentials: "sc-aws-${{ parameters.environment }}"
     regionName: "us-east-1"
     scriptType: "inline"
-    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
     inlineScript: |
+      cd $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
       terraform apply \
         -input=false \
         $(Pipeline.Workspace)/plan-artifact/tfplan
@@ -59,10 +58,9 @@ steps:
     awsCredentials: "sc-aws-${{ parameters.environment }}"
     regionName: "us-east-1"
     scriptType: "inline"
-    workingDirectory: $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
     inlineScript: |
-      terraform output -json \
-        > $(Build.ArtifactStagingDirectory)/outputs.json
+      cd $(Build.SourcesDirectory)/environments/${{ parameters.environment }}/${{ parameters.component }}
+      terraform output -json > $(Build.ArtifactStagingDirectory)/outputs.json
       echo "──── Outputs ────"
       cat $(Build.ArtifactStagingDirectory)/outputs.json
 
